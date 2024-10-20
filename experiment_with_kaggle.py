@@ -10,8 +10,8 @@ import torch.nn as nn
 import mlflow
 import mlflow.pytorch
 
-# Disable GPU usage
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+# Set device to GPU if available, else CPU
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Function to download dataset from Kaggle
 def download_kaggle_dataset(dataset_name, download_path="./kaggle_datasets"):
@@ -38,6 +38,7 @@ model, tokenizer = load_model_and_tokenizer(config.model_name, config.task)
 
 # Replace model with BertForSequenceClassification
 id2label = {0: "World", 1: "Sports", 2: "Business", 3: "Sci/Tech"}
+label2id = {"World": 0, "Sports": 1, "Business": 2, "Sci/Tech": 3}
 label2id = {v: k for k, v in id2label.items()}
 model = BertForSequenceClassification.from_pretrained(
     config.model_name, 
@@ -46,20 +47,27 @@ model = BertForSequenceClassification.from_pretrained(
     label2id=label2id
 )
 
+# Move model to the appropriate device
+model.to(device)
+
 # Add a padding token if not already present
 if tokenizer.pad_token is None:
     tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     model.resize_token_embeddings(len(tokenizer))
 
+# Calculate max length based on the dataset length distribution
+max_length = int(sum([len(tokenizer.tokenize(text)) for text in dataset["train"]["Description"]]) / len(dataset["train"]))
+
 # Tokenize Dataset
 def tokenize_function(examples):
-    return tokenizer(examples["Description"], padding="max_length", truncation=True)
+    return tokenizer(examples["Description"], padding="max_length", truncation=True, max_length=max_length)
 
 tokenized_datasets = dataset.map(tokenize_function, batched=True)
 
 # Add labels to the tokenized dataset
 def add_labels(examples):
-    examples["labels"] = examples["Class Index"]
+    # Ensure the class index starts from 0
+    examples["labels"] = [label - 1 for label in examples["Class Index"]]
     return examples
 
 tokenized_datasets = tokenized_datasets.map(add_labels, batched=True)
