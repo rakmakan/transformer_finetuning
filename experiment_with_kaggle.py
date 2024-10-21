@@ -2,6 +2,7 @@ import os
 import torch
 from transformers import Trainer, TrainingArguments, BertForSequenceClassification
 from datasets import load_dataset
+import evaluate
 from load_model_tokenizer import load_model_and_tokenizer
 from model_config import get_config
 import kaggle
@@ -9,6 +10,7 @@ import pandas as pd
 import torch.nn as nn
 import mlflow
 import mlflow.pytorch
+from torch.utils.tensorboard import SummaryWriter
 
 # Set device to GPU if available, else CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -81,8 +83,15 @@ training_args = TrainingArguments(
     save_steps=config.save_steps,
     save_total_limit=2,
     logging_dir=config.logging_dir,
-    evaluation_strategy="epoch",
+    evaluation_strategy="steps",
+    logging_steps=10,
 )
+
+# Start TensorBoard SummaryWriter
+writer = SummaryWriter(config.logging_dir)
+
+# Load metrics for evaluation
+accuracy_metric = evaluate.load("accuracy")
 
 # Start MLflow experiment
 mlflow.set_experiment("bert_fine_tuning_experiment")
@@ -93,22 +102,46 @@ with mlflow.start_run():
     mlflow.log_param("batch_size", config.batch_size)
 
     # Define Trainer
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        predictions = torch.argmax(torch.tensor(logits), axis=-1)
+        accuracy = accuracy_metric.compute(predictions=predictions, references=labels)
+        return accuracy
+
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
+        compute_metrics=compute_metrics,
     )
 
     # Fine-tune the Model
-    trainer.train()
+    for step, output in enumerate(trainer.train()):
+        writer.add_scalar("Training Loss", output.loss, step)
 
     # Evaluate the Model
     validation_metrics = trainer.evaluate()
     validation_loss = validation_metrics.get("eval_loss", None)
+    validation_accuracy = validation_metrics.get("eval_accuracy", None)
+
     if validation_loss is not None:
         print(f"Validation Loss: {validation_loss}")
         mlflow.log_metric("validation_loss", validation_loss)
+        writer.add_scalar("Validation Loss", validation_loss)
+
+    if validation_accuracy is not None:
+        print(f"Validation Accuracy: {validation_accuracy}")
+        mlflow.log_metric("validation_accuracy", validation_accuracy)
+        writer.add_scalar("Validation Accuracy", validation_accuracy)
+
+    # Calculate training accuracy
+    train_metrics = trainer.evaluate(eval_dataset=tokenized_datasets["train"])
+    train_accuracy = train_metrics.get("eval_accuracy", None)
+    if train_accuracy is not None:
+        print(f"Training Accuracy: {train_accuracy}")
+        mlflow.log_metric("training_accuracy", train_accuracy)
+        writer.add_scalar("Training Accuracy", train_accuracy)
 
     # Log the trained model
     mlflow.pytorch.log_model(model, "model")
@@ -118,5 +151,8 @@ model_output_dir = config.output_dir
 os.makedirs(model_output_dir, exist_ok=True)
 model.save_pretrained(model_output_dir)
 tokenizer.save_pretrained(model_output_dir)
+
+# Close TensorBoard writer
+writer.close()
 
 print("Model fine-tuned and saved to", model_output_dir)
